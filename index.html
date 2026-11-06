@@ -127,6 +127,9 @@ body::before {
 
 #actions { display: grid; gap: 10px; }
 .card { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.imgwrap2 { position: relative; border-radius: 10px; overflow: hidden; min-height: 120px; background: rgba(45,212,255,.06); display: grid; place-items: center; }
+.genimg { width: 100%; display: block; border-radius: 10px; }
+.imgph { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--muted); letter-spacing: .06em; }
 .card h3 { margin: 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
 .card .val { font-size: 21px; font-weight: 500; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
 .card .body { background: var(--bg); border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
@@ -496,7 +499,7 @@ body::after { display: none; }
     "You are Jarvis, a calm, smart and slightly witty voice assistant like Jarvis from the Iron Man films. The user talks to you in Hindi/Hinglish.\n" +
     "Reply in Hinglish: Hindi written in English letters, the way people text on WhatsApp (example: 'Haan bilkul, abhi karta hoon. Aur kuch?'). Keep it short, at most 2-3 sentences. No Devanagari script, no markdown, no lists, no emojis.\n" +
     "You cannot send SMS, place calls or open apps yourself. When your action is open_app, sms or call, the page shows a button the user taps; for only these three cases, never say the task is done, say the button is ready.\n" +
-    "You also cannot generate, draw or create any image, photo or picture, and have no such action. If asked for an image, say plainly in Hinglish that you cannot make images right now, keep action null, and never mention any button.\n" +
+    "If asked for an image, photo or picture, use the image action below; you never draw it yourself and never describe what it looks like in words, just say it is being made.\n" +
     "For anything that is not open_app, sms, call, reminder or terminal, keep action null and never mention a button, tapping, or that something is ready to use — just answer normally in words.\n" +
     "Return only one JSON object and nothing else:\n" +
     '{"say": "<your Hinglish reply>", "speak": "<the same reply in Hindi, Devanagari script>", "action": null, "remember": null}\n' +
@@ -509,6 +512,8 @@ body::after { display: none; }
     '- {"type":"call","to":"<phone number>"} when the user wants to call and has given the number.\n' +
     '- {"type":"reminder","minutes":<number>,"text":"<what to remind>"} when the user asks to be reminded or wants a timer after some time or at a time today. Convert it to minutes from now using the current time given below (minutes between 1 and 1440). Never promise a phone alarm; say the reminder is set in Jarvis.\n' +
     '- {"type":"terminal","cmd":"<one Linux-style command>"} when the user asks to run a Linux or terminal command (ls, cat, echo, mkdir, grep, date, tree and similar). It runs in a safe sandbox with a virtual file system inside Jarvis, not on the real phone; say that in your reply.\n' +
+    '- {"type":"image","prompt":"<a short, clear English description of the picture, suitable for an AI image generator>"} when the user asks for a picture, photo, image, drawing, wallpaper, poster, logo or similar to be made. The app generates it; you only pass the prompt.\n' +
+    '- {"type":"search","query":"<a short English search query>"} when the user asks something factual you are not fully sure of, something that may have changed since you were trained, or a current fact (who is X, when did Y happen, what is Z, current holder of a role, recent events). Do not guess; use this instead. When you set this action, say should be a short Hinglish line like "Ek second, dekhta hoon" and speak the matching Hindi, nothing else.\n' +
     "If the user mentions the weather, the message will carry a [Live weather ...] note: use only that for weather facts. You have no live news or web search; say so if asked.\n" +
     "If the user gives a contact name that is in the contact list below, use that number for calls and SMS.\n" +
     "If the number for an SMS or call is missing, keep action null and ask for it in say. You have no access to the contact list.\n" +
@@ -1234,6 +1239,19 @@ body::after { display: none; }
       }, function () { if (!done) { done = true; clearTimeout(to); resolve("\n[Weather unavailable: location permission was not given]"); } }, { timeout: 8000, maximumAge: 600000 });
     });
   }
+  function webSearch(q) {
+    var query = String(q || "").trim().slice(0, 200);
+    if (!query) return Promise.resolve("\n[Search unavailable: empty query]");
+    return fetchT("https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=1&srsearch=" + encodeURIComponent(query), { method: "GET" }, 8000)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var hit = j && j.query && j.query.search && j.query.search[0];
+        if (!hit) return "\n[Search result for \"" + query + "\": nothing found]";
+        var snip = String(hit.snippet || "").replace(/<[^>]+>/g, "");
+        return "\n[Search result for \"" + query + "\" (" + hit.title + "): " + snip + "]";
+      })
+      .catch(function () { return "\n[Search unavailable: lookup failed]"; });
+  }
   var unlocked = !(LS.get("jv_pass") || "").trim(), hiddenAt = 0;
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") hiddenAt = Date.now();
@@ -1279,6 +1297,15 @@ body::after { display: none; }
     var t0 = performance.now();
     try {
       var out = parseJson(await askClaude(apiKey));
+      if (out && out.action && out.action.type === "search" && typeof out.action.query === "string" && out.action.query.trim()) {
+        var q = out.action.query.trim().slice(0, 200);
+        turns.push({ role: "assistant", content: (out.say || "Dekhta hoon.") });
+        logEvent("Searching: " + q.slice(0, 40));
+        var info = await webSearch(q);
+        turns.push({ role: "user", content: "[System note: yahi hai jo search se mila]" + info + "\nAb isi jaankari se seedha, pakka jawab do, usi JSON format me, action null rakho (dobara search mat maango)." });
+        out = parseJson(await askClaude(apiKey));
+        if (out && out.action && out.action.type === "search") out.action = null;
+      }
       lastLatency = (performance.now() - t0) / 1000;
       logEvent("Replied in " + lastLatency.toFixed(1) + " s");
       var say = out && typeof out.say === "string" && out.say.trim() ? out.say.trim() : "Theek hai.";
@@ -1513,6 +1540,27 @@ body::after { display: none; }
       ob.addEventListener("click", function () { $("termBtn").click(); });
       c.appendChild(ob);
       logEvent("Terminal: " + cmd.slice(0, 30));
+    } else if (action.type === "image") {
+      var prompt = String(action.prompt || "").replace(/\s+/g, " ").trim().slice(0, 300);
+      if (!prompt) return;
+      c.className = "card imgcard";
+      c.appendChild(mk("h3", null, "Image"));
+      c.appendChild(mk("div", "val", prompt));
+      var im = document.createElement("img");
+      im.className = "genimg";
+      im.alt = prompt;
+      im.loading = "lazy";
+      im.src = "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) + "?width=640&height=640&nologo=true&seed=" + Math.floor(Math.random() * 100000);
+      var wrap = mk("div", "imgwrap2");
+      var ph = mk("div", "imgph", "Generating…");
+      wrap.appendChild(ph); wrap.appendChild(im);
+      im.addEventListener("load", function () { ph.remove(); });
+      im.addEventListener("error", function () { ph.textContent = "Image load nahi ho payi. Dobara try karein."; });
+      c.appendChild(wrap);
+      var dl = mk("a", "btn ghost", "Download / open full");
+      dl.href = im.src; dl.target = "_blank"; dl.rel = "noopener noreferrer";
+      c.appendChild(dl);
+      logEvent("Image: " + prompt.slice(0, 40));
     } else if (action.type === "reminder") {
       var mins = Number(action.minutes), rtext = String(action.text || "").replace(/\s+/g, " ").trim().slice(0, 140);
       if (!isFinite(mins) || mins < 0.5 || mins > 1440 || !rtext) return;
